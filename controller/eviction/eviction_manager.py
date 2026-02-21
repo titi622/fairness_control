@@ -119,7 +119,7 @@ class EvictionManager:
 
                 cpu_free, mem_free = self._get_node_realtime_free(node_name)
                 gain_cpu, gain_mem, reducible_count = self._get_service_gain_on_node(node_name, service_name, min_c)
-                print(f"candidate: NODE: {node_name} reduce cnt: {reducible_count}")
+                print(f"candidate: SERVICE: {service_name}  NODE: {node_name} reduce cnt: {reducible_count}")
                 # 삭제가능한 파드가 없다면 이번 노드는 제외
                 if reducible_count == 0:
                     continue
