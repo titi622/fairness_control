@@ -5,12 +5,13 @@ from typing import Dict, List
 
 from collector.prometheus import PrometheusCollector
 from collector.jaeger import JaegerCollector
+from collector.node import NodeResourceManager
 
 
 # ----------------------------
 # DB 생성
 # ----------------------------
-conn = sqlite3.connect("../trace_store.db")
+conn = sqlite3.connect("/home/ubuntu/fairness_control/trace_store.db")
 cur = conn.cursor()
 
 cur.executescript("""
@@ -62,6 +63,8 @@ def main():
 
     prom = PrometheusCollector(PROMETHEUS_URL)
     jaeger = JaegerCollector(JAEGER_URL)
+
+    manager = NodeResourceManager(conn)
 
 
     logging.info("Knative profiler 시작 (Prometheus / Jaeger 분리 모드)")
@@ -137,41 +140,11 @@ def main():
                     conn.commit()
 
             # =====================================================
-            # 3) 주기 대기
+            # 3) 노드 정보 수집
             # =====================================================
-            # cur.execute("""
-            #     SELECT
-            #     creation_time_us,
-            #     service,
-            #     revision,
-            #     pod_count
-            #     FROM pod_snapshots
-            #     ORDER BY creation_time_us DESC
-            #     LIMIT 30
-            #     """)
+            manager.sync_cluster_nodes_to_db()
 
-            # pod_rows = cur.fetchall()
-            # for row in pod_rows:
-            #     print(row)
-
-            # cur.execute("""
-            #     SELECT
-            #     trace_id,
-            #     creation_time_us,
-            #     service,
-            #     revision,
-            #     start_time_us,
-            #     duration_ms
-            #     FROM traces
-            #     ORDER BY creation_time_us DESC
-            #     LIMIT 30
-            #     """)
-
-            # trace_rows = cur.fetchall()
-            # for row in trace_rows:
-            #     print(row)
-
-            time.sleep(20)
+            time.sleep(10)
 
     except KeyboardInterrupt:
         logging.info("종료 신호 수신, 요약 출력")
