@@ -11,7 +11,7 @@ INTERVAL_SEC = 20
 
 
 def now_us() -> int:
-    return int(time.time() * 1_000_000)
+    return time.time_ns() // 1_000
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -66,19 +66,17 @@ def run_once(conn: sqlite3.Connection) -> None:
     # 1) t_execute 계산
     t_execute_map = exetime.compute(
         db_path=DB_PATH,
-        window_sec=60,
+        window_sec=300,
     )
     print("[t_execute_map]", t_execute_map)
 
     # 2) request_cnt 계산
     request_cnt_map = reqcnt.compute(
-        db_path=DB_PATH,
-        window_sec=60,
-        split_sec=20,
+        db_path=DB_PATH
     )
     print("[request_cnt_map]", request_cnt_map)
 
-    # 3) service_profile 업데이트
+    # 3) service_profile 업데이트 
     update_sql = """
         UPDATE service_profile
         SET
@@ -112,7 +110,7 @@ def run_once(conn: sqlite3.Connection) -> None:
     # 5) min/max 컨테이너 업데이트
     minmax.update_minmax(
         db_path=DB_PATH,
-        window_sec=60,
+        window_sec=300,
         split_sec=20,
     )
     cur.execute("SELECT * FROM service_profile;")

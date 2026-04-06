@@ -106,7 +106,7 @@ class EvictionManager:
             WHERE service != ? ORDER BY t_cold ASC, weight ASC
         """, (trigger_service,)).fetchall()
         
-        # 2-1. 유효성 검증용으로 트리거 서비스의 max-c 값을 가져와서 0 일경우 이후 유효성 체크 안함 (아래 로직에서 이걸 활용한 유효성 체크를 disabled - 3.11)
+        # 2-1. 유효성 검증용으로 트리거 서비스의 max-c 값을 가져와서 0 일경우 이후 유효성 체크 안함
         validation = self.conn.execute(
             """
             SELECT max_container FROM service_profile
@@ -138,7 +138,7 @@ class EvictionManager:
                 # 유효성검증
                 if count > reducible_count:
                     continue
-                if all_running - count < min_c: # and trigger_max_c != 0 a
+                if trigger_max_c != 0 and all_running - count < min_c:
                     continue
 
                 res[0] = cpu_free  # db 값을 안쓰고 nodes_dict[node_name][0] 을 실시간 데이터로 갱신

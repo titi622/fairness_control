@@ -1,12 +1,13 @@
 import sqlite3
 import time
 from typing import Dict, Optional
+import math
 
 
 def update_minmax(
     db_path: str,
     window_sec: int,
-    split_sec: int,
+    split_sec: int, # 이제 별 필요없음 (안씀)
 ) -> int:
 
     conn = sqlite3.connect(db_path, timeout=5)
@@ -14,7 +15,7 @@ def update_minmax(
 
     try:
         # 0) compute window size
-        window = round(window_sec / split_sec)
+        # window = round(window_sec / split_sec)
         # 1) 모든 서비스의 평균 qos (Q_all)
         cur.execute("""
             SELECT AVG(qos)
@@ -24,10 +25,17 @@ def update_minmax(
         """)
         row = cur.fetchone()
         avg_qos_all = row[0] if row and row[0] is not None else 0.0
-
+        print(f"AVERAGE QOS : {avg_qos_all}")
         # 분모 보호
         if avg_qos_all <= 0:
-            print("Error: qos is 0")
+            print("Error: qos is 0") # QOS 평균이 0 이라면 어떤 서비스도 시작 되지 않았지 때문에 모든 맥스값은 0이다
+            cur.execute(
+            """
+            UPDATE service_profile
+            SET max_container = 0, min_container = 0
+            """
+            )
+            conn.commit()
             return 0
 
         # 2) 서비스별 필요한 값 읽기
@@ -52,13 +60,12 @@ def update_minmax(
         ) in cur.fetchall():
 
             # 분자
-            numerator = 0.5 * request_cnt * t_warm
+            numerator = request_cnt 
 
             # 분모
             denominator = (
-                avg_qos_all* 100 * weight
-                - (t_cold / window)
-                - (t_warm / 2.0)
+                2/ (avg_qos_all * weight)
+                - 1
             )
 
             if denominator <= 0:
@@ -73,10 +80,10 @@ def update_minmax(
         cur.executemany(
             """
             UPDATE service_profile
-            SET max_container = ?
+            SET max_container = ?, min_container = ?
             WHERE service = ?
             """,
-            [(mc, svc) for svc, mc in results.items()]
+            [(mc, mc, svc) for svc, mc in results.items()]
         )
         conn.commit()
 

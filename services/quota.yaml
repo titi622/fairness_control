@@ -15,3 +15,57 @@ metadata:
 spec:
   hard:
     pods: "10"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pod-quota
+  namespace: test3
+spec:
+  hard:
+    pods: "200"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pod-quota
+  namespace: small-fast
+spec:
+  hard:
+    pods: "67"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pod-quota
+  namespace: small-fast2
+spec:
+  hard:
+    pods: "67"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pod-quota
+  namespace: medium-fast
+spec:
+  hard:
+    pods: "41"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pod-quota
+  namespace: medium-slow
+spec:
+  hard:
+    pods: "41"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pod-quota
+  namespace: large
+spec:
+  hard:
+    pods: "14"

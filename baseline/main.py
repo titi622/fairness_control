@@ -158,8 +158,7 @@ class EvictionWatcher(threading.Thread):
 
                     uid = pod.metadata.uid or ""
                     namespace = pod.metadata.namespace
-                    service = namespace  # 네 코드 가정 유지
-
+                    service = namespace  
                     now = time.time()
 
                     # 1) in-flight(쿨타임) 중복 방지
@@ -181,28 +180,31 @@ class EvictionWatcher(threading.Thread):
                     # resource_version 갱신
                     current_rv = pod.metadata.resource_version
 
-                    try:
-                        maxc = sqlite_get_max_container(conn, service)
-                    except sqlite3.OperationalError as e:
-                        print(f"[warn] sqlite read failed: {e}")
-                        maxc = None
+                    # try:
+                    #     maxc = sqlite_get_max_container(conn, service)
+                    # except sqlite3.OperationalError as e:
+                    #     print(f"[warn] sqlite read failed: {e}")
+                    #     maxc = None
 
                     pod_count = count_running_pods(v1, namespace)
 
                     print("\n========== PENDING DETECTED ==========")
                     print(f"pod       : {namespace}/{pod.metadata.name}")
                     # print(f"reason    : {reason}")
-                    print(f"max_cont  : {maxc}")
+                    # print(f"max_cont  : {maxc}")
                     print(f"pod_count : {pod_count}")
 
                     # 네 기존 조건 유지 (단 maxc None 방어)
-                    if maxc is None:
-                        print("[noop] max_container is None")
-                        continue
+                    # if maxc is None:
+                    #     print("[noop] max_container is None")
+                    #     continue
 
                     # if maxc ==0 : # or pod_count < maxc:
-                    print("[action] eviction planning")
-                    plan = evict_mgr.find_eviction_plan(service, pod)
+                    ## eviction 로직 직전에 진짜 이 Pod가 아직도 pending 중인지 확인
+                    pod_tmp = v1.read_namespaced_pod(name=pod.metadata.name, namespace=namespace)
+                    if pod_tmp.status.phase == "Pending":
+                        print("[action] eviction planning")
+                        plan = evict_mgr.find_eviction_plan(service, pod)
 
                     if plan:
                         print(f"=== EVICTION PLAN FOUND ({plan['strategy']}) ===")
@@ -283,13 +285,16 @@ class QuotaReleaserWatcher(threading.Thread):
 
         # cur_rv = v1.list_event_for_all_namespaces(limit=1).metadata.resource_version
         conn = sqlite3.connect(SQLITE_PATH, timeout=5.0, check_same_thread=False)
+        cursor = conn.cursor()
 
+        scaleup_times: Dict[str, datetime] = {}  # {namespace: last_scaleup_time}
         print("[thread] quota releaser started")
         while not self.stop_event.is_set():
             try:
                 for ev in w.stream(
                     v1.list_event_for_all_namespaces,
-                    field_selector=field_sel,
+                    # field_selector=field_sel,
+                    resource_version=cur_rv,
                     timeout_seconds=30,
                 ):
                     if self.stop_event.is_set():
@@ -297,38 +302,67 @@ class QuotaReleaserWatcher(threading.Thread):
 
                     obj: client.V1Event = ev.get("object")
                     
-                    if obj.metadata and obj.metadata.resource_version:
-                        cur_rv = obj.metadata.resource_version
-
-                    if not self._is_quota_block_event(obj):
-                        continue
-
+                    reason = obj.reason
+                    ts = obj.metadata.creation_timestamp
                     ns = obj.metadata.namespace
                     src = obj.involved_object.name
                     msg = obj.message or ""
+                    involved = obj.involved_object
 
-                    try:
-                        cur = self._get_pods_quota(v1, ns)
-                        if cur is None:
-                            print(f"[quota][skip] ns={ns} '{self.quota_name}' has no hard.pods")
-                            continue
+                    # quota exceed 처리 (최근 스케일업 이벤트와 2초 이내의 exceed 이벤트만 신규요청에 의한 이벤트로 간주. 그게 아니라면 단순히 reconciliation에 의한 ReplicaSet 재생성 이벤트로 간주하여 무시)
+                    if reason == "FailedCreate": # self._is_quota_block_event(obj):
+                        last_scale_ts = scaleup_times.get(ns)
+                        print(f"[quota][info] [{ts}] Detected FailedCreate in ns={ns} src={src} msg={msg}")
+                        if last_scale_ts and (ts - last_scale_ts).total_seconds() < 2:
+                            print(f"[quota][info] [{ts}] FailedCreate is within 2s of last scale-up in ns={ns}. Treating as new request.")
+                            try:
+                                cur = self._get_pods_quota(v1, ns)
+                                if cur is None:
+                                    print(f"[quota][skip] ns={ns} '{self.quota_name}' has no hard.pods")
+                                    continue
 
-                        try:
-                            maxc = sqlite_get_max_container(conn, ns)
-                        except sqlite3.OperationalError as e:
-                            print(f"[warn] sqlite read failed: {e}")
-                            maxc = None
-                        # max container 보다 현재 파드수가 적다면
-                        if cur < maxc:
-                            new = cur + 1
-                        else:
-                            continue
-                        self._patch_pods_quota(v1, ns, new)
-                        print(f"[quota][patch] ns={ns} {self.quota_name}.hard.pods {cur} -> {new} (obj={src})")
-                        print(f"             msg={msg}")
+                                new = cur + 1
 
-                    except Exception as e:
-                        print(f"[quota][error] ns={ns} patch failed: {e}")
+                                self._patch_pods_quota(v1, ns, new)
+                                print(f"[quota][patch] ns={ns} {self.quota_name}.hard.pods {cur} -> {new} (obj={src})")
+                                print(f"             msg={msg}")
+                            except Exception as e:
+                                print(f"[quota][error] ns={ns} patch failed: {e}")
+                    elif reason == "ScalingReplicaSet":
+                        # scale up 처리
+                        if "Scaled up replica" in msg:
+                            print(f"[quota][info] [{ts}] Detected scale-up event in ns={ns} src={src}: {msg}")
+                            scaleup_times[ns] = ts
+                    else:
+                        continue
+
+                    if obj.metadata and obj.metadata.resource_version:
+                        cur_rv = obj.metadata.resource_version
+
+
+
+                    # quota 상향시 기동 가능한 리소스가 있는지를 확인. 없다면 상향하지 않음
+                    # cursor.execute(
+                    #         "SELECT req_cpu, req_mem FROM service_profile WHERE service = ?",
+                    #         (ns,)
+                    # )
+                    # row = cursor.fetchone()
+                    # req_cpu = row[0]
+                    # req_mem = row[1]
+
+                    # cursor.execute("""
+                    #     SELECT 1
+                    #     FROM node_resource_status
+                    #     WHERE cpu_free_m >= ? AND mem_free_bytes >= ?
+                    #     LIMIT 1
+                    # """, (req_cpu, req_mem))
+                    # is_avail_node = cur.fetchone() is not None
+
+                    # if cur.is_avail_node is None:
+                    #     continue                  
+
+                    # 가용한 리소스가 있고 quota 조정이 필요한 상황이라면 quota 상향 시도
+
 
             except ApiException as e:
                 if self.stop_event.is_set():

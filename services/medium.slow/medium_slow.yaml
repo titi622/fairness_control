@@ -1,0 +1,34 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: medium-slow
+  namespace: medium-slow
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/class: "kpa.autoscaling.knative.dev"
+        autoscaling.knative.dev/metric: "concurrency"
+        autoscaling.knative.dev/target: "1"
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "41"
+    spec:
+      containerConcurrency: 1
+      containers:
+      - image: ghcr.io/titi622/medium-slow:v1
+        env:
+        - name: COLD_SLEEP_SEC
+          value: "3"
+        ports:
+        - containerPort: 8090
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8090
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "1"
+            memory: "256Mi"

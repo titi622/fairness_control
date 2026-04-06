@@ -6,7 +6,8 @@ from typing import Dict, List
 from collector.prometheus import PrometheusCollector
 from collector.jaeger import JaegerCollector
 from collector.node import NodeResourceManager
-
+from collector.pods import K8sPodCollector
+from collector.profiles import ProfileCollector
 
 # ----------------------------
 # DB 생성
@@ -55,7 +56,7 @@ logging.basicConfig(
 )
 
 def now_us() -> int:
-    return int(time.time() * 1_000_000)
+    return time.time_ns() // 1_000 
 
 def main():
     PROMETHEUS_URL = "http://localhost:9090"
@@ -63,8 +64,9 @@ def main():
 
     prom = PrometheusCollector(PROMETHEUS_URL)
     jaeger = JaegerCollector(JAEGER_URL)
-
+    pods = K8sPodCollector()
     manager = NodeResourceManager(conn)
+    profiles = ProfileCollector(conn)
 
 
     logging.info("Knative profiler 시작 (Prometheus / Jaeger 분리 모드)")
@@ -77,15 +79,16 @@ def main():
             # =====================================================
             # 1) Prometheus 출력 (상태 스냅샷)
             # =====================================================
-            prom_results = prom.get_service_info()
+            # prom_results = prom.get_service_info()
+            pods_results = pods.get_service_info()
 
             print("\n=== Prometheus: Knative Service Status ===")
-            if not prom_results:
+            if not pods_results:
                 print("No services found.")
             else:
                 print(f"{'SERVICE':<20} | {'REVISION':<30} | {'POD COUNT':<10}")
                 print("-" * 70)
-                for m in prom_results:
+                for m in pods_results:
                     print(
                         f"{m['service']:<20} | "
                         f"{m['revision']:<30} | "
@@ -144,7 +147,12 @@ def main():
             # =====================================================
             manager.sync_cluster_nodes_to_db()
 
-            time.sleep(10)
+            # =====================================================
+            # 4) 프로필 정보 저장
+            # =====================================================
+            profiles.save_profile()
+
+            time.sleep(1)
 
     except KeyboardInterrupt:
         logging.info("종료 신호 수신, 요약 출력")

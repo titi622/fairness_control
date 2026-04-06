@@ -4,7 +4,7 @@ from typing import Dict, Optional
 
 
 def now_us() -> int:
-    return int(time.time() * 1_000_000)
+    return time.time_ns() // 1_000
 
 
 def compute(
@@ -23,7 +23,7 @@ def compute(
         # 2) window 계산
         window_end_us = now_us()
         window_start_us = window_end_us - window_sec * 1_000_000
-
+        print(f"start time : ${window_start_us}, End Time: ${window_end_us}")
         # 3) 평균 실행시간 계산
         cur.execute(
             """

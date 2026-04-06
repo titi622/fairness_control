@@ -107,14 +107,14 @@ class EvictionManager:
         """, (trigger_service,)).fetchall()
         
         # 2-1. 유효성 검증용으로 트리거 서비스의 max-c 값을 가져와서 0 일경우 이후 유효성 체크 안함 (아래 로직에서 이걸 활용한 유효성 체크를 disabled - 3.11)
-        validation = self.conn.execute(
-            """
-            SELECT max_container FROM service_profile
-            WHERE service = ?
-            """,
-            (trigger_service,)
-        ).fetchone()
-        trigger_max_c = validation[0]
+        # validation = self.conn.execute(
+        #     """
+        #     SELECT max_container FROM service_profile
+        #     WHERE service = ?
+        #     """,
+        #     (trigger_service,)
+        # ).fetchone()
+        # trigger_max_c = validation[0]
 
         nodes_dict = {
             row[0]: [row[1], row[2]] 
@@ -126,10 +126,12 @@ class EvictionManager:
         for service_name, min_c in candidates:
             all_running = len(self.v1.list_namespaced_pod(namespace=service_name, field_selector="status.phase=Running").items)
             for node_name, res in nodes_dict.items():  # 노드별 루프를 돌기위해 사용
-
-                cpu_free, mem_free = self._get_node_realtime_free(node_name)
+                
+                cpu_free = res[0]  # DB에서 가져온 값
+                mem_free = res[1]  # DB에서 가져온 값
+                # cpu_free, mem_free = self._get_node_realtime_free(node_name)
                 gain_cpu, gain_mem, reducible_count = self._get_service_gain_on_node(node_name, service_name, min_c)
-                print(f"candidate: SERVICE: {service_name}  NODE: {node_name} reduce cnt: {reducible_count}")
+                # print(f"candidate: SERVICE: {service_name}  NODE: {node_name} reduce cnt: {reducible_count}")
                 # 삭제가능한 파드가 없다면 이번 노드는 제외
                 if reducible_count == 0:
                     continue
@@ -138,11 +140,11 @@ class EvictionManager:
                 # 유효성검증
                 if count > reducible_count:
                     continue
-                if all_running - count < min_c: # and trigger_max_c != 0 a
-                    continue
+                # if all_running - count < min_c: # and trigger_max_c != 0 a
+                #     continue
 
-                res[0] = cpu_free  # db 값을 안쓰고 nodes_dict[node_name][0] 을 실시간 데이터로 갱신
-                res[1] = mem_free  # db 값을 안쓰고 nodes_dict[node_name][1] 을 실시간 데이터로 갱신
+                # res[0] = cpu_free  # db 값을 안쓰고 nodes_dict[node_name][0] 을 실시간 데이터로 갱신
+                # res[1] = mem_free  # db 값을 안쓰고 nodes_dict[node_name][1] 을 실시간 데이터로 갱신
 
                 # if (cpu_free + gain_cpu >= req_cpu) and (mem_free + gain_mem >= req_mem):
                 return {
@@ -202,7 +204,8 @@ class EvictionManager:
                     if p.metadata.deletion_timestamp is None
                 ]
                 pods_counts = len(global_pods)
-                quota = pods_counts - needed_count
+                if pods_counts > 2:  #최소 2개는 유지
+                    quota = pods_counts - needed_count
                 print(f"!!!!evict!!!! pod_count: {pods_counts}, needed_count: {needed_count}")
                 patch_body = {
                                 "spec": {
@@ -223,7 +226,7 @@ class EvictionManager:
                         break
                     
                     # 2. 파드 삭제 실행 (Graceful 옵션 적용)
-                    print(f"  [exec] Deleting pod {pod.metadata.name} (GracePeriod: 3s)...")
+                    print(f"  [exec] Deleting pod {pod.metadata.name} (GracePeriod: 1s)...")
                     self.v1.delete_namespaced_pod(
                         name=pod.metadata.name,
                         namespace=service_name,
