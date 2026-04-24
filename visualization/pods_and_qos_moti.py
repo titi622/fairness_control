@@ -71,14 +71,14 @@ def create_combined_chart(start_time, end_time, services):
         q_data = df_qos[df_qos['service'] == service]
         # current_color = colors(i)
         current_color = service_colors.get(service, 'black')  # 기본값
-        # alias = service_alias.get(service, service)
+        alias = service_alias.get(service, service)
         if not p_data.empty:
             ax1.step(p_data['elapsed_sec'], p_data['pod_count'], where='post',
-                    label=f'{service} (#Pods)', color=current_color, linewidth=1.5, alpha=0.7, linestyle='--')
+                    label=f'{alias} (#Pods)', color=current_color, linewidth=1.5, alpha=0.7, linestyle='--')
 
         if not q_data.empty:
             ax2.plot(q_data['elapsed_sec'], q_data['qos'],
-                    label=f'{service} (QoS)', color=current_color, linewidth=2.5)
+                    label=f'{alias} (QoS)', color=current_color, linewidth=2.5)
     # --- 변경 포인트: 시간 정보 제거 ---
     ax1.set_xlabel('Time (Seconds)', fontsize=20) # 'from start_time' 제거
     ax1.set_ylabel('Pod Count', color='black', fontsize=20)
@@ -102,8 +102,8 @@ def create_combined_chart(start_time, end_time, services):
     print("✅ 분석 완료: 실제 시간 정보 없이 'pod_qos_analysis.png'로 저장되었습니다.")
 
 if __name__ == "__main__":
-    TARGET_START = '2026-04-23 13:39:35'
-    TARGET_END   = '2026-04-23 14:00:49'
-    TARGET_SERVICES = ['small-fast', 'medium-slow', 'large']
+    TARGET_START = '2026-04-24 21:57:39'
+    TARGET_END   = '2026-04-24 22:08:40'
+    TARGET_SERVICES = ['small-fast', 'small-fast2']
     
     create_combined_chart(TARGET_START, TARGET_END, TARGET_SERVICES)

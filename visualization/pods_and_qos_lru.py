@@ -5,9 +5,34 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
+SCENARIOS = {
+    "scenario1": {
+        "services": ["small-fast", "small-fast2"],
+        "LRU": {"start": "2026-04-23 20:40:19", "end": "2026-04-23 20:51:07"},
+    },
+    "scenario2": {
+        "services": ["small-fast", "small-fast2"],
+        "LRU": {"start": "2026-04-23 22:38:33", "end": "2026-04-23 22:53:32"},
+    },
+    "scenario3": {
+        "services": ["small-fast", "medium-fast"],
+        "LRU": {"start": "2026-04-23 23:02:07", "end": "2026-04-23 23:22:05"},
+    },
+    "scenario4": {
+        "services": ["medium-fast", "medium-slow"],
+        "LRU": {"start": "2026-04-23 23:35:24", "end": "2026-04-23 23:55:01"},
+    },
+    "scenario5": {
+        "services": ["small-fast", "medium-slow", "large"],
+        "LRU": {"start": "2026-04-24 08:12:21", "end": "2026-04-24 08:47:34"},
+    },
+    "scenario6": {
+        "services": ["small-fast", "small-fast2"],
+        "LRU": {"start": "2026-04-24 10:47:22", "end": "2026-04-24 11:07:39"},
+    },
+}
 
-
-def create_combined_chart(start_time, end_time, services):
+def create_combined_chart(start_time, end_time, services,output_path):
     conn = sqlite3.connect('/home/ubuntu/fairness_control/trace_store.db')
     
     service_placeholders = "', '".join(services)
@@ -96,14 +121,35 @@ def create_combined_chart(start_time, end_time, services):
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', bbox_to_anchor=(1.1, 1.0), fontsize=20)
 
     ax1.grid(True, linestyle=':', alpha=0.6)
+    x_max = 0
+    if not df_pod.empty:
+        x_max = max(x_max, df_pod['elapsed_sec'].max())
+    if not df_qos.empty:
+        x_max = max(x_max, df_qos['elapsed_sec'].max())
+    ax1.set_xlim(0, x_max)
+
+    # 표시 라벨은 그냥 0~700 (100 단위)
+    labels = np.arange(0, 1251, 200)
+
+    # tick 위치는 1200 기준으로 균등하게
+    ticks = np.linspace(0, x_max, len(labels))
+
+    ax1.set_xticks(ticks)
+    ax1.set_xticklabels(labels)
     plt.tight_layout()
 
-    plt.savefig("/home/ubuntu/fairness_control/pod_qos_analysis.png")
-    print("✅ 분석 완료: 실제 시간 정보 없이 'pod_qos_analysis.png'로 저장되었습니다.")
+    plt.savefig(output_path)
+    print(f"✅ 분석 완료: {output_path}")
+    plt.close()
 
 if __name__ == "__main__":
-    TARGET_START = '2026-04-23 13:39:35'
-    TARGET_END   = '2026-04-23 14:00:49'
-    TARGET_SERVICES = ['small-fast', 'medium-slow', 'large']
-    
-    create_combined_chart(TARGET_START, TARGET_END, TARGET_SERVICES)
+    for i in range(1, 7):
+        key = f"scenario{i}"
+        scenario = SCENARIOS[key]
+
+        create_combined_chart(
+            start_time=scenario["LRU"]["start"],
+            end_time=scenario["LRU"]["end"],
+            services=scenario["services"],
+            output_path=f"/home/ubuntu/fairness_control/qos_lru{i}.png"
+        )

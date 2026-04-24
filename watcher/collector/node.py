@@ -30,11 +30,14 @@ class NodeResourceManager:
             last_updated DATETIME
         )
         """
-        self.conn.execute(query)
-        self.conn.commit()
-
+        try:
+            self.conn.execute(query)
+            self.conn.commit()
+        except Exception as e:
+            print(f"테이블 생성 실패: {e}")
+            self.conn.rollback()
     @staticmethod
-    def _parse_cpu(cpu_str: str) -> int:
+    def _parse_cpu(cpu_str: str) -> int:        
         if not cpu_str: return 0
         if str(cpu_str).endswith("m"): return int(cpu_str[:-1])
         return int(float(cpu_str) * 1000)
@@ -115,10 +118,15 @@ class NodeResourceManager:
                 mem_free_bytes=excluded.mem_free_bytes,
                 last_updated=excluded.last_updated
             """
-            self.conn.execute(query, (
-                node_name, cpu_total, cpu_used, cpu_free,
-                mem_total, mem_used, mem_free, datetime.now()
-            ))
-            self.conn.commit()
+            try:
+                self.conn.execute(query, (
+                    node_name, cpu_total, cpu_used, cpu_free,
+                    mem_total, mem_used, mem_free, datetime.now()
+                ))
+                self.conn.commit()
+            except Exception as e:
+                print(f"DB 업데이트 실패: {e}")
+                self.conn.rollback()
+                continue
         
         print(f"[{datetime.now()}] 총 {synced_count}개 워커 노드의 상태 동기화 완료.")

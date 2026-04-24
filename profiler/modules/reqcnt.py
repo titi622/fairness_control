@@ -32,7 +32,7 @@ def compute(db_path: str) -> Dict[str, int]:
     동시성은 (service, revision) 단위로 계산한 뒤 service로 max 집계.
     """
     window_end_us = now_us()
-    window_start_us = window_end_us - 300 * 1_000_000  # 2 minutes
+    window_start_us = window_end_us - 300 * 1_000_000  # 5 minutes
 
     conn = sqlite3.connect(db_path)
     try:

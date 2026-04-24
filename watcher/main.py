@@ -94,13 +94,16 @@ def main():
                         f"{m['revision']:<30} | "
                         f"{m['pod_count']:<10}"
                     )
-                    cur.execute("""
-                        INSERT OR IGNORE INTO pod_snapshots
-                        (creation_time_us, service, revision, pod_count)
-                        VALUES (?, ?, ?, ?)
-                    """, (creation_time_us, m["service"], m["revision"], int(m["pod_count"])))
-                    conn.commit()
-
+                    try:
+                        cur.execute("""
+                            INSERT OR IGNORE INTO pod_snapshots
+                            (creation_time_us, service, revision, pod_count)
+                            VALUES (?, ?, ?, ?)
+                        """, (creation_time_us, m["service"], m["revision"], int(m["pod_count"])))
+                        conn.commit()
+                    except Exception as e:
+                        print(f"테이블 생성 실패: {e}")
+                        conn.rollback()
             # =====================================================
             # 2) Jaeger 출력 (요청 단위 trace 정보)
             # =====================================================
@@ -122,7 +125,7 @@ def main():
                     limit=500
                 )
             except Exception as e:
-                logging.warning(f"[{service}] trace 조회 실패: {e}")
+                logging.warning(f"trace 조회 실패: {e}")
                 continue
 
             jager_results = jaeger.extract_request_info(traces)

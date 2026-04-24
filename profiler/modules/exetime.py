@@ -9,7 +9,7 @@ def now_us() -> int:
 
 def compute(
     db_path: str,
-    window_sec: int = 60,
+    window_sec: int = 330,
 ) -> Dict[str, Optional[float]]:
 
     conn = sqlite3.connect(db_path)

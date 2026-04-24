@@ -6,7 +6,7 @@ def update_qos(db_path: str) -> int:
     모든 서비스에 대해 '최신 service_profile row 1개'의 qos를 계산하여 UPDATE 한다.
 
     qos = t_warm / t_execute
-    - t_execute가 0 또는 NULL이면 1로 환산
+    - t_execute가 0 또는 NULL이면 0으로 환산
     - t_warm이 NULL이면 0으로 처리
 
     Returns:
@@ -21,7 +21,7 @@ def update_qos(db_path: str) -> int:
         UPDATE service_profile
         SET qos =
             CASE 
-                WHEN t_execute IS NULL OR t_execute = 0.0 THEN 1.0
+                WHEN t_execute IS NULL OR t_execute = 0.0 THEN 0.0 -- 기본값을 1에서 0으로 변경(그래프 표현의 직관성을 위해)
                 ELSE (t_warm / t_execute)
 
             END;

@@ -48,13 +48,6 @@ def seed_profile(conn: sqlite3.Connection) -> None:
     creation_time_us = now_us()
 
     # 예시: hello 서비스 1개 시드
-    cur.execute("""
-        INSERT OR REPLACE INTO service_profile
-        (service, creation_time, weight, t_warm, t_cold)
-        VALUES (?, ?, ?, ?, ?)
-    """, ("hello", creation_time_us, 1, 3.308, 1623.653))
-    conn.commit()
-
 
 def run_once(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
@@ -99,13 +92,13 @@ def run_once(conn: sqlite3.Connection) -> None:
 
     conn.commit()
 
-    cur.execute("SELECT * FROM service_profile;")
-    print("[after t_execute/request_cnt]", cur.fetchall())
+    #cur.execute("SELECT * FROM service_profile;")
+    # print("[after t_execute/request_cnt]", cur.fetchall())
 
     # 4) QoS 업데이트
     qos.update_qos(DB_PATH)
-    cur.execute("SELECT * FROM service_profile;")
-    print("[after qos]", cur.fetchall())
+    #cur.execute("SELECT * FROM service_profile;")
+    # print("[after qos]", cur.fetchall())
 
     # 5) min/max 컨테이너 업데이트
     minmax.update_minmax(

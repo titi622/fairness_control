@@ -4,11 +4,11 @@ from datetime import datetime
 from kubernetes import client, config
 
 SERVICE_RESOURCES = {
-    "small-fast":  {"cpu_m": 50,  "mem_bytes": 128 * 1024 * 1024},
-    "small-fast2": {"cpu_m": 50,  "mem_bytes": 128 * 1024 * 1024},
-    "medium-fast": {"cpu_m": 100, "mem_bytes": 256 * 1024 * 1024},
-    "medium-slow": {"cpu_m": 100, "mem_bytes": 256 * 1024 * 1024},
-    "large":       {"cpu_m": 300, "mem_bytes": 512 * 1024 * 1024},
+    "small-fast":  {"cpu_m": 50,  "mem_bytes": 128 },
+    "small-fast2": {"cpu_m": 50,  "mem_bytes": 128 },
+    "medium-fast": {"cpu_m": 100, "mem_bytes": 256 },
+    "medium-slow": {"cpu_m": 100, "mem_bytes": 256 },
+    "large":       {"cpu_m": 300, "mem_bytes": 512 },
 }
 
 class EvictionManager:
@@ -132,92 +132,70 @@ class EvictionManager:
         # [Level 1] 단일 서비스 하나만으로 해결 가능한 노드가 있는지 전수 조사
         for service_name, min_c in candidates:
             all_running = len(self.v1.list_namespaced_pod(namespace=service_name, field_selector="status.phase=Running").items)
+            for node_name, res in nodes_dict.items():  # 노드별 루프를 돌기위해 사용
 
-            gain_cpu = SERVICE_RESOURCES[service_name]["cpu_m"]
-            gain_mem = SERVICE_RESOURCES[service_name]["mem_bytes"]
-            print(f"candidate: SERVICE: {service_name}  reduce cnt: {all_running}")
-            # 삭제가능한 파드가 없다면 이번 노드는 제외
-            if all_running == 0:
-                continue
-            # 자원확보를 위해 필요한 최소 파드수 개산
-            count = max(math.ceil((req_cpu)/gain_cpu), math.ceil((req_mem)/gain_mem))
-            print(f"  needed count: {count} (CPU 기준: {math.ceil((req_cpu)/gain_cpu)}, MEM 기준: {math.ceil((req_mem)/gain_mem)})")
-            # 유효성검증
-            if count > all_running:
-                continue
-            if all_running - count < min_c: # and trigger_max_c != 0 a
-                continue
+                # cpu_free, mem_free = self._get_node_realtime_free(node_name)
+                cpu_free = res[0]  # db 값을 안쓰고 nodes_dict[node_name][0] 을 실시간 데이터로 갱신
+                mem_free = res[1]  # db 값을 안쓰고 nodes_dict[node_name
+                if cpu_free >= req_cpu and mem_free >= req_mem:
+                    # 현재 노드에 여유가 충분하므로, eviction 불필요
+                    return None
 
-            # if (cpu_free + gain_cpu >= req_cpu) and (mem_free + gain_mem >= req_mem):
-            return {
-                "strategy": "Single Service",
-                "node": "notused",
-                "evict_list": [{"service": service_name, "count": count}]
-            }
+                reducible_count = self._get_service_gain_on_node(node_name, service_name, min_c)
+                gain_cpu = SERVICE_RESOURCES[service_name]["cpu_m"]
+                gain_mem = SERVICE_RESOURCES[service_name]["mem_bytes"]
+                print(f"candidate: SERVICE: {service_name}  NODE: {node_name} reduce cnt: {reducible_count}")
+                # 삭제가능한 파드가 없다면 이번 노드는 제외
+                if reducible_count == 0:
+                    continue
+                # 자원확보를 위해 필요한 최소 파드수 개산
+                count = max(math.ceil((req_cpu - cpu_free)/gain_cpu), math.ceil((req_mem - mem_free)/gain_mem))
+                # 유효성검증
+                if count > reducible_count:
+                    continue
+                if all_running - count < min_c: # and trigger_max_c != 0 a
+                    continue
+
+                # if (cpu_free + gain_cpu >= req_cpu) and (mem_free + gain_mem >= req_mem):
+                return {
+                    "strategy": "Single Service",
+                    "node": node_name,
+                    "evict_list": [{"service": service_name, "count": count}]
+                }
 
         # [Level 2] 단일로 안될 경우, 우선순위 순으로 누적(1순위 + 2순위...)하여 조사
         # node_states = {n[0]: {"cpu": n[1], "mem": n[2], "plan": []} for n in nodes}
-        # node_states = {name: {"cpu": res[0], "mem": res[1], "plan": []} for name, res in nodes_dict.items()}
-        # for service_name, min_c in candidates:
-        #     for node_name in node_states.keys():
-        #         state = node_states[node_name]
-        #         gain_cpu, gain_mem, count = self._get_service_gain_on_node(node_name, service_name, min_c)
-        #         gain_cpu = RES
-        #         if count > 0:
-        #             state["cpu"] += gain_cpu
-        #             state["mem"] += gain_mem
-        #             state["plan"].append({"service": service_name, "count": count})
+        node_states = {name: {"cpu": res[0], "mem": res[1], "plan": []} for name, res in nodes_dict.items()}
+        for service_name, min_c in candidates:
+            for node_name in node_states.keys():
+                state = node_states[node_name]
+                gain_cpu, gain_mem, count = self._get_service_gain_on_node(node_name, service_name, min_c)
+                gain_cpu = RES
+                if count > 0:
+                    state["cpu"] += gain_cpu
+                    state["mem"] += gain_mem
+                    state["plan"].append({"service": service_name, "count": count})
 
-        #         if state["cpu"] >= req_cpu and state["mem"] >= req_mem:
-        #             return {
-        #                 "strategy": "Cumulative Services",
-        #                 "node": node_name,
-        #                 "evict_list": state["plan"]
-        #             }
+                if state["cpu"] >= req_cpu and state["mem"] >= req_mem:
+                    return {
+                        "strategy": "Cumulative Services",
+                        "node": node_name,
+                        "evict_list": state["plan"]
+                    }
         
         return None
 
-    def execute_eviction(self, trigger_service, evict_list):
+    def execute_eviction(self, node_name, evict_list):
         """
         계획된 리스트에 따라 실제 파드를 삭제함.
         """
-        ## 1 step 요청이 들어온 서비스 파드의 쿼터를 민값으로 변경
-        validation = self.conn.execute(
-            """
-            SELECT min_container FROM service_profile
-            WHERE service = ?
-            """,
-            (trigger_service,)
-        ).fetchone()
-        if trigger_service == "large":
-            trigger_min_c = max(1,validation[0])
-        else:
-            trigger_min_c = max(4,validation[0])
-
-        try:
-            patch_body = {
-                    "spec": {
-                        "hard": {
-                            "pods": str(trigger_min_c)
-                        }
-                    }
-                }
-            self.v1.patch_namespaced_resource_quota(
-                name="pod-quota", 
-                namespace=trigger_service, 
-                body=patch_body
-            )
-        except Exception as e:
-            print(f"[error] Failed to patch resource quota for {trigger_service}: {e}")
-            return
-
         for item in evict_list:
             service_name = item['service']
             needed_count = item['count']
             
             # 1. 해당 노드에 있는 해당 서비스의 Running 파드 목록 가져오기
             # (서비스명이 곧 네임스페이스인 구조 반영)
-            sel = f"status.phase=Running"
+            sel = f"spec.nodeName={node_name},status.phase=Running"
             try:
                 # pods = self.v1.list_namespaced_pod(namespace=service_name, field_selector=sel).items
                 pods = [
@@ -262,11 +240,11 @@ class EvictionManager:
                         name=pod.metadata.name,
                         namespace=service_name,
                         # 1초 동안 기존 요청 처리 시간을 보장
-                        body=client.V1DeleteOptions(grace_period_seconds=0)
+                        body=client.V1DeleteOptions(grace_period_seconds=1)
                     )
                     evicted_count += 1
                 
-                print(f"[success] Evicted {evicted_count} pods from {service_name}")
+                print(f"[success] Evicted {evicted_count} pods from {service_name} on {node_name}")
             
             except Exception as e:
                 print(f"[error] Failed to evict pods for {service_name}: {e}")

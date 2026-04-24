@@ -6,8 +6,11 @@ import time
 import sqlite3
 import threading
 import signal
+import json
+import subprocess
 from datetime import datetime, timezone
 from typing import Optional, Tuple, Dict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from kubernetes import client, config, watch
 from kubernetes.client import V1Pod
@@ -25,7 +28,26 @@ PRINT_REPEAT_SECONDS = float(5)
 
 IN_FLIGHT_TIMEOUT = 5  # seconds
 
+TRIGGER_HOST = "0.0.0.0"
+TRIGGER_PORT = 9999
+TRIGGER_COOLDOWN_SECONDS = 2.0  # 같은 서비스에 대해 너무 자주 patch되는 것 방지
+TRIGGER_DELETE_KSERVICE = True  # 트리거 시 ksvc 삭제 여부
 
+TARGET_POD_QUOTA = {
+    "small-fast": 67,
+    "small-fast2": 67,
+    "medium-fast": 41,
+    "medium-slow": 41,
+    "large": 14,
+}
+
+SERVICE_YAML_PATH = {
+    "small-fast": "/home/ubuntu/fairness_control/services/small.fast/small_fast.yaml",
+    "small-fast2": "/home/ubuntu/fairness_control/services/small.fast2/small_fast2.yaml",
+    "medium-fast": "/home/ubuntu/fairness_control/services/medium.fast/medium_fast.yaml",
+    "medium-slow": "/home/ubuntu/fairness_control/services/medium.slow/medium_slow.yaml",
+    "large": "/home/ubuntu/fairness_control/services/large/large.yaml",
+}
 def load_kube_config() -> None:
     try:
         config.load_incluster_config()
@@ -239,24 +261,71 @@ class EvictionWatcher(threading.Thread):
         print("[thread] eviction watcher stopped")
 
 
-class QuotaReleaserWatcher(threading.Thread):
-    def __init__(self, stop_event: threading.Event, quota_name: str = "pod-quota"):
-            super().__init__(name="quota-releaser", daemon=True)
-            self.stop_event = stop_event
-            self.quota_name = quota_name
 
-    def _is_quota_block_event(self, ev_obj) -> bool:
-        reason = (ev_obj.reason or "").lower()
-        msg = (ev_obj.message or "").lower()
-        kind = (ev_obj.involved_object.kind or "").lower()
+class TriggerRequestHandler(BaseHTTPRequestHandler):
+    server_version = "quota-trigger/1.0"
 
-        if kind not in ("replicaset", "deployment"):
-            return False
-        if "failedcreate" not in reason:
-            return False
-        if "exceeded quota" in msg:
-            return True
-        return False
+    def _send_json(self, status_code: int, payload: dict) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+    def do_POST(self):
+        if self.path != "/trigger":
+            self._send_json(404, {"ok": False, "error": "not found"})
+            return
+
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            self._send_json(400, {"ok": False, "error": "invalid json"})
+            return
+
+        service = str(data.get("service", "")).strip()
+        ksvc = str(data.get("ksvc", service)).strip()
+
+        if not service:
+            self._send_json(400, {"ok": False, "error": "service is required"})
+            return
+
+        ok, msg = self.server.thread_obj.handle_trigger(service, ksvc)
+        if ok:
+            self._send_json(200, {"ok": True, "service": service, "ksvc": ksvc, "message": msg})
+        else:
+            self._send_json(400, {"ok": False, "service": service, "ksvc": ksvc, "error": msg})
+
+
+
+class TriggerHTTPServer(ThreadingHTTPServer):
+    def __init__(self, server_address, RequestHandlerClass, thread_obj):
+        super().__init__(server_address, RequestHandlerClass)
+        self.thread_obj = thread_obj
+
+
+class TriggerServerThread(threading.Thread):
+    """
+    외부에서 POST /trigger {"service":"medium-fast"} 를 받으면
+    해당 namespace의 pod quota를 즉시 목표값으로 patch
+    """
+    def __init__(self, stop_event: threading.Event, host: str = TRIGGER_HOST, port: int = TRIGGER_PORT,
+                 quota_name: str = "pod-quota"):
+        super().__init__(name="trigger-server", daemon=True)
+        self.stop_event = stop_event
+        self.host = host
+        self.port = port
+        self.quota_name = quota_name
+        self.last_trigger_times: Dict[str, float] = {}
+        self.lock = threading.Lock()
+        self.httpd: Optional[TriggerHTTPServer] = None
 
     def _get_pods_quota(self, v1: client.CoreV1Api, namespace: str) -> Optional[int]:
         rq = v1.read_namespaced_resource_quota(name=self.quota_name, namespace=namespace)
@@ -272,116 +341,286 @@ class QuotaReleaserWatcher(threading.Thread):
             namespace=namespace,
             body=patch_body
         )
+    
+    def _delete_ksvc(self, namespace: str, ksvc_name: str) -> None:
+        api = client.CustomObjectsApi(client.ApiClient())
+        v1 = client.CoreV1Api(client.ApiClient())
 
-    def run(self) -> None:
+        # original_quota = None
+
+        # # 1) 현재 pods quota 백업
+        # original_quota = self._get_pods_quota(v1, namespace)
+        # print(f"[trigger] original pods quota in ns {namespace}: {original_quota}")
+
+        # # 2) 삭제 전에 quota를 0으로 낮춰서 새 pod 생성 차단
+        # if original_quota is not None:
+        #     self._patch_pods_quota(v1, namespace, 0)
+        #     print(f"[trigger] patched pods quota to 0 in ns {namespace}")
+
+
+
+        api.delete_namespaced_custom_object(
+            group="serving.knative.dev",
+            version="v1",
+            namespace=namespace,
+            plural="services",
+            name=ksvc_name
+        )
+        # time.sleep(2)  
+        # # 바로 안지워 질수있으니 딜리트로 한번더 사살
+        # subprocess.run([
+        #     "kubectl", "delete", "pods", "--all",
+        #     "-n", namespace,
+        #     "--force",
+        #     "--grace-period=0"
+        # ], check=False)
+        # time.sleep(2)
+
+        # if original_quota is not None:
+        #     self._patch_pods_quota(v1, namespace, original_quota)
+        # pods = v1.list_namespaced_pod(namespace=namespace).items
+        # for pod in pods:
+        #     try:
+        #         v1.delete_namespaced_pod(
+        #             name=pod.metadata.name,
+        #             namespace=namespace,
+        #             grace_period_seconds=0
+        #         )
+        #         print(f"[trigger] deleted pod {pod.metadata.name} in ns {namespace} after ksvc delete")
+        #         time.sleep(0.1)  
+        #     except Exception as e:
+        #         print(f"[WARN] failed to delete pod {pod.metadata.name}: {e}")
+
+    def _reduce_quota_and_delete_pods(self, namespace: str, delete_count: int = 4) -> None:
         api_client = client.ApiClient()
         v1 = client.CoreV1Api(api_client)
-        w = watch.Watch()
 
-        field_sel = "reason=FailedCreate"
-        def _refresh_rv() -> str:
-            return v1.list_event_for_all_namespaces(limit=1).metadata.resource_version
-        cur_rv = _refresh_rv()
+        # 1) 현재 quota 조회
+        rq = v1.read_namespaced_resource_quota(
+            name=self.quota_name,
+            namespace=namespace
+        )
 
-        # cur_rv = v1.list_event_for_all_namespaces(limit=1).metadata.resource_version
-        conn = sqlite3.connect(SQLITE_PATH, timeout=5.0, check_same_thread=False)
-        cursor = conn.cursor()
+        pods_str = (rq.spec.hard or {}).get("pods")
+        if pods_str is None:
+            raise RuntimeError(f"'pods' quota not found in namespace={namespace}")
 
-        scaleup_times: Dict[str, datetime] = {}  # {namespace: last_scaleup_time}
-        print("[thread] quota releaser started")
-        while not self.stop_event.is_set():
+        cur_quota = int(str(pods_str))
+        new_quota = max(0, cur_quota - delete_count)
+
+        # 2) quota 감소 patch
+        patch_body = {
+            "spec": {
+                "hard": {
+                    "pods": str(new_quota)
+                }
+            }
+        }
+
+        v1.patch_namespaced_resource_quota(
+            name=self.quota_name,
+            namespace=namespace,
+            body=patch_body
+        )
+        print(f"[trigger][quota] ns={namespace} pods {cur_quota} -> {new_quota}")
+
+        time.sleep(1)
+
+        # 3) pod 목록 조회
+        pods = v1.list_namespaced_pod(namespace=namespace).items
+
+        # 종료 대상 제외하고 Running 위주로 정렬
+        candidate_pods = [
+            pod for pod in pods
+            if pod.metadata.deletion_timestamp is None
+        ]
+
+        # Running 파드 우선 삭제
+        candidate_pods.sort(
+            key=lambda p: (
+                0 if p.status.phase == "Running" else 1,
+                p.metadata.creation_timestamp
+            )
+        )
+
+        # 4) 최대 delete_count개 삭제
+        deleted = 0
+        for pod in candidate_pods[:delete_count]:
             try:
-                for ev in w.stream(
-                    v1.list_event_for_all_namespaces,
-                    # field_selector=field_sel,
-                    resource_version=cur_rv,
-                    timeout_seconds=30,
-                ):
-                    if self.stop_event.is_set():
-                        break
-
-                    obj: client.V1Event = ev.get("object")
-                    
-                    reason = obj.reason
-                    ts = obj.metadata.creation_timestamp
-                    ns = obj.metadata.namespace
-                    src = obj.involved_object.name
-                    msg = obj.message or ""
-                    involved = obj.involved_object
-
-                    # quota exceed 처리 (최근 스케일업 이벤트와 2초 이내의 exceed 이벤트만 신규요청에 의한 이벤트로 간주. 그게 아니라면 단순히 reconciliation에 의한 ReplicaSet 재생성 이벤트로 간주하여 무시)
-                    if reason == "FailedCreate": # self._is_quota_block_event(obj):
-                        last_scale_ts = scaleup_times.get(ns)
-                        print(f"[quota][info] [{ts}] Detected FailedCreate in ns={ns} src={src} msg={msg}")
-                        if last_scale_ts and (ts - last_scale_ts).total_seconds() < 2:
-                            print(f"[quota][info] [{ts}] FailedCreate is within 2s of last scale-up in ns={ns}. Treating as new request.")
-                            try:
-                                cur = self._get_pods_quota(v1, ns)
-                                if cur is None:
-                                    print(f"[quota][skip] ns={ns} '{self.quota_name}' has no hard.pods")
-                                    continue
-
-                                new = cur + 1
-
-                                self._patch_pods_quota(v1, ns, new)
-                                print(f"[quota][patch] ns={ns} {self.quota_name}.hard.pods {cur} -> {new} (obj={src})")
-                                print(f"             msg={msg}")
-                            except Exception as e:
-                                print(f"[quota][error] ns={ns} patch failed: {e}")
-                    elif reason == "ScalingReplicaSet":
-                        # scale up 처리
-                        if "Scaled up replica" in msg:
-                            print(f"[quota][info] [{ts}] Detected scale-up event in ns={ns} src={src}: {msg}")
-                            scaleup_times[ns] = ts
-                    else:
-                        continue
-
-                    if obj.metadata and obj.metadata.resource_version:
-                        cur_rv = obj.metadata.resource_version
-
-
-
-                    # quota 상향시 기동 가능한 리소스가 있는지를 확인. 없다면 상향하지 않음
-                    # cursor.execute(
-                    #         "SELECT req_cpu, req_mem FROM service_profile WHERE service = ?",
-                    #         (ns,)
-                    # )
-                    # row = cursor.fetchone()
-                    # req_cpu = row[0]
-                    # req_mem = row[1]
-
-                    # cursor.execute("""
-                    #     SELECT 1
-                    #     FROM node_resource_status
-                    #     WHERE cpu_free_m >= ? AND mem_free_bytes >= ?
-                    #     LIMIT 1
-                    # """, (req_cpu, req_mem))
-                    # is_avail_node = cur.fetchone() is not None
-
-                    # if cur.is_avail_node is None:
-                    #     continue                  
-
-                    # 가용한 리소스가 있고 quota 조정이 필요한 상황이라면 quota 상향 시도
-
-
-            except ApiException as e:
-                if self.stop_event.is_set():
-                    break
-                if e.status == 410:
-                    cur_rv = _refresh_rv()
-                    print(f"[quota][warn] watch expired(410). reset rv -> {cur_rv}")
-                    continue
-                print(f"[quota][warn] watch api error: {e} (retry in 2s)")
-                time.sleep(2)
-
+                v1.delete_namespaced_pod(
+                    name=pod.metadata.name,
+                    namespace=namespace,
+                    grace_period_seconds=0
+                )
+                deleted += 1
+                print(f"[trigger][pod-delete] ns={namespace} pod={pod.metadata.name}")
+                time.sleep(0.1)
             except Exception as e:
-                if self.stop_event.is_set():
-                    break
-                print(f"[quota][warn] watch error: {e} (retry in 2s)")
-                time.sleep(2)
+                print(f"[WARN] failed to delete pod {pod.metadata.name}: {e}")
 
-        print("[thread] quota releaser stopped")
+        print(f"[trigger][done] ns={namespace} requested_delete={delete_count}, actual_deleted={deleted}")
 
+    def _restore_quota(self, namespace: str, quota_count: int = 4) -> None:
+        api_client = client.ApiClient()
+        v1 = client.CoreV1Api(api_client)
+
+        # 2) quota 원복
+        patch_body = {
+            "spec": {
+                "hard": {
+                    "pods": str(quota_count)
+                }
+            }
+        }
+
+        v1.patch_namespaced_resource_quota(
+            name=self.quota_name,
+            namespace=namespace,
+            body=patch_body
+        )
+        print(f"[trigger][quota] ns={namespace} pods quota_count {quota_count}")
+
+        time.sleep(1)
+
+        # 3) pod 목록 조회
+        pods = v1.list_namespaced_pod(namespace=namespace).items
+
+        # 종료 대상 제외하고 Running 위주로 정렬
+        candidate_pods = [
+            pod for pod in pods
+            if pod.metadata.deletion_timestamp is None
+        ]
+
+        # Running 파드 우선 삭제
+        candidate_pods.sort(
+            key=lambda p: (
+                0 if p.status.phase == "Running" else 1,
+                p.metadata.creation_timestamp
+            )
+        )
+
+        # 4) 파드 하나 삭제
+        deleted = 0
+        for pod in candidate_pods[:1]:
+            try:
+                v1.delete_namespaced_pod(
+                    name=pod.metadata.name,
+                    namespace=namespace,
+                    grace_period_seconds=0
+                )
+                deleted += 1
+                print(f"[trigger][pod-delete] ns={namespace} pod={pod.metadata.name}")
+                time.sleep(0.1)
+            except Exception as e:
+                print(f"[WARN] failed to delete pod {pod.metadata.name}: {e}")
+
+        print(f"[trigger][done] ns={namespace} restored")
+    
+    def handle_trigger(self, service: str, ksvc_name: str) -> Tuple[bool, str]:
+        if service not in TARGET_POD_QUOTA:
+            return False, f"unknown service: {service}"
+
+
+        v1 = client.CoreV1Api(client.ApiClient())
+        new_quota = TARGET_POD_QUOTA[service]
+
+        try:
+            cur_quota = self._get_pods_quota(v1, service)
+        except ApiException as e:
+            return False, f"read quota failed: {e}"
+
+        try:
+            if cur_quota != new_quota:
+                self._patch_pods_quota(v1, service, new_quota)
+                print(f"[trigger][patch] ns={service} {self.quota_name}.hard.pods {cur_quota} -> {new_quota}")
+            else:
+                print(f"[trigger][noop] ns={service} already pods={cur_quota}")
+        except ApiException as e:
+            return False, f"patch quota failed: {e}"
+        except Exception as e:
+            return False, f"unexpected quota patch error: {e}"
+
+        if ksvc_name == "create":
+            # yaml apply
+            yaml_path = SERVICE_YAML_PATH.get(service)
+            if not yaml_path:
+                return False, f"no yaml path defined for {service}"
+
+            try:
+                subprocess.run([
+                    "kubectl", "apply",
+                    "-f", yaml_path
+                ], check=True)
+
+                print(f"[trigger][create] applied {yaml_path}")
+                return True, f"quota {cur_quota}->{new_quota}, applied {yaml_path}"
+
+            except subprocess.CalledProcessError as e:
+                return False, f"kubectl apply failed: {e}"
+
+        elif ksvc_name == "delete":
+            # 기존 ksvc delete 로직 유지
+            if TRIGGER_DELETE_KSERVICE:
+                try:
+                    self._delete_ksvc(service, service)
+                    print(f"[trigger][delete] ksvc {service}/{service}")
+                except ApiException as e:
+                    if e.status == 404:
+                        return False, f"ksvc not found: {service}/{service}"
+                    return False, f"delete ksvc failed: {e}"
+                except Exception as e:
+                    return False, f"unexpected ksvc delete error: {e}"
+
+            if cur_quota != new_quota:
+                return True, f"patched quota {cur_quota}->{new_quota}, deleted ksvc {service}/{service}"
+            return True, f"quota already {new_quota}, deleted ksvc {service}/{service}"
+        elif ksvc_name == "reduce":
+            # 기존 ksvc delete 로직 유지
+            if TRIGGER_DELETE_KSERVICE:
+                try:
+                    self._reduce_quota_and_delete_pods(service, delete_count=4)
+                    print(f"[trigger][reduce] ksvc {service}/{service}")
+                except ApiException as e:
+                    if e.status == 404:
+                        return False, f"ksvc not found: {service}/{service}"
+                    return False, f"reduce ksvc failed: {e}"
+                except Exception as e:
+                    return False, f"unexpected ksvc reduce error: {e}"
+
+            if cur_quota != new_quota:
+                return True, f"patched quota {cur_quota}->{new_quota}, reduced ksvc {service}/{service}"
+            return True, f"quota already {new_quota}, reduced ksvc {service}/{service}"
+        elif ksvc_name == "restore":
+            # 기존 ksvc delete 로직 유지
+            if TRIGGER_DELETE_KSERVICE:
+                try:
+                    self._restore_quota(service, quota_count=67)
+                    print(f"[trigger][restore] ksvc {service}/{service}")
+                except ApiException as e:
+                    if e.status == 404:
+                        return False, f"ksvc not found: {service}/{service}"
+                    return False, f"restore ksvc failed: {e}"
+                except Exception as e:
+                    return False, f"unexpected ksvc restore error: {e}"
+
+            if cur_quota != new_quota:
+                return True, f"patched quota {cur_quota}->{new_quota}, restored ksvc {service}/{service}"
+            return True, f"quota already {new_quota}, restored ksvc {service}/{service}"
+
+    def run(self) -> None:
+        print(f"[thread] trigger server started on {self.host}:{self.port}")
+        self.httpd = TriggerHTTPServer((self.host, self.port), TriggerRequestHandler, self)
+        self.httpd.timeout = 1.0
+
+        while not self.stop_event.is_set():
+            self.httpd.handle_request()
+
+        try:
+            self.httpd.server_close()
+        except Exception:
+            pass
+
+        print("[thread] trigger server stopped")
 
 def main() -> None:
     try:
@@ -401,11 +640,13 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_sig)
     signal.signal(signal.SIGTERM, _handle_sig)
 
-    t_evict = EvictionWatcher(stop_event)
-    t_quota = QuotaReleaserWatcher(stop_event)  # 아직 stub
+    # t_evict = EvictionWatcher(stop_event)
+    # t_quota = QuotaReleaserWatcher(stop_event)  # 아직 stub
+    t_trigger = TriggerServerThread(stop_event, host=TRIGGER_HOST, port=TRIGGER_PORT)
 
-    t_evict.start()
-    t_quota.start()
+    # t_evict.start()
+    # t_quota.start()
+    t_trigger.start()
 
     # main thread: liveness + join
     try:
@@ -414,7 +655,8 @@ def main() -> None:
     finally:
         stop_event.set()
         t_evict.join(timeout=5)
-        t_quota.join(timeout=5)
+        # t_quota.join(timeout=5)
+        t_trigger.join(timeout=5)
         print("[main] exit")
 
 

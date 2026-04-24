@@ -13,34 +13,36 @@ class K8sPodCollector:
     def get_service_info(self):
         pod_data = []
 
-        # default 제외한 모든 namespace 조회
+        # 시스템관련을 제외한 모든 namespace 조회
+        exclude = {"default", "kube-system", "istio-system", "knative-serving", "observability", "kube-public", "kube-node-lease"}
         namespaces = self.v1.list_namespace().items
         target_namespaces = [
             ns.metadata.name
             for ns in namespaces
-            if ns.metadata.name != "default"
+            if ns.metadata.name not in exclude
         ]
 
         for namespace in target_namespaces:
             pods = self.v1.list_namespaced_pod(namespace=namespace).items
-
             counts = {}
-            for pod in pods:
-                labels = pod.metadata.labels or {}
+            service_name = namespace #labels.get("serving.knative.dev/service")
+            revision_name = namespace #labels.get("serving.knative.dev/revision")
+            key = (service_name, revision_name)
+            if key not in counts:
+                counts[key] = 0
 
-                service_name = labels.get("serving.knative.dev/service")
-                revision_name = labels.get("serving.knative.dev/revision")
+            for pod in pods:
+                # labels = pod.metadata.labels or {}
+                service_name = namespace #labels.get("serving.knative.dev/service")
+                revision_name = namespace #labels.get("serving.knative.dev/revision")
 
                 # Knative pod만 대상으로
-                if not service_name or not revision_name:
-                    continue
+                # if not service_name or not revision_name:
+                #     continue
 
                 # Running pod만 카운트
-                if pod.status.phase != "Running":
-                    continue
-
-                key = (service_name, revision_name)
-                counts[key] = counts.get(key, 0) + 1
+                if pod.status.phase == "Running":
+                    counts[key] += 1
 
             for (service_name, revision_name), count in counts.items():
                 pod_data.append({

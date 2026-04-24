@@ -12,6 +12,10 @@ spec:
         autoscaling.knative.dev/target: "1"
         autoscaling.knative.dev/minScale: "0"
         autoscaling.knative.dev/maxScale: "67"
+        autoscaling.knative.dev/window: "1m"
+        autoscaling.knative.dev/scale-down-delay: "5m"
+        autoscaling.knative.dev/target-burst-capacity: "-1"
+        autoscaling.knative.dev/initial-scale: "0"
     spec:
       containerConcurrency: 1
       containers:

@@ -138,7 +138,7 @@ class EvictionManager:
                 # 자원확보를 위해 필요한 최소 파드수 개산
                 count = max(math.ceil((req_cpu - cpu_free)/gain_cpu), math.ceil((req_mem - mem_free)/gain_mem))
                 # 유효성검증
-                if count > reducible_count:
+                if count > reducible_count or count <= 0:
                     continue
                 # if all_running - count < min_c: # and trigger_max_c != 0 a
                 #     continue
@@ -204,8 +204,9 @@ class EvictionManager:
                     if p.metadata.deletion_timestamp is None
                 ]
                 pods_counts = len(global_pods)
-                if pods_counts > 2:  #최소 2개는 유지
-                    quota = pods_counts - needed_count
+                if pods_counts <= 0:  #필요시 최소유지 개수 설정(default 0)
+                    continue
+                quota = pods_counts - needed_count
                 print(f"!!!!evict!!!! pod_count: {pods_counts}, needed_count: {needed_count}")
                 patch_body = {
                                 "spec": {
@@ -220,7 +221,7 @@ class EvictionManager:
                     body=patch_body
                 )
                 evicted_count = 0
-                print(f"evict pod count: {len(pods)}")
+                # print(f"victor nodes current pod count: {len(pods)}")
                 for pod in pods:
                     if evicted_count >= needed_count:
                         break

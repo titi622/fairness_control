@@ -13,12 +13,20 @@ def update_minmax(
     conn = sqlite3.connect(db_path, timeout=5)
     cur = conn.cursor()
 
+    SERVICE_RESOURCES = {
+        "small-fast":  {"cpu_m": 50,  "mem_bytes": 128 * 1024 * 1024},
+        "small-fast2": {"cpu_m": 50,  "mem_bytes": 128 * 1024 * 1024},
+        "medium-fast": {"cpu_m": 100, "mem_bytes": 256 * 1024 * 1024},
+        "medium-slow": {"cpu_m": 100, "mem_bytes": 256 * 1024 * 1024},
+        "large":       {"cpu_m": 300, "mem_bytes": 512 * 1024 * 1024},
+    }
+
     try:
         # 0) compute window size
         # window = round(window_sec / split_sec)
         # 1) 모든 서비스의 평균 qos (Q_all)
         cur.execute("""
-            SELECT AVG(qos)
+            SELECT avg(qos)
             FROM service_profile
             WHERE t_execute IS NOT NULL AND t_execute > 0
             AND qos IS NOT NULL;
@@ -48,42 +56,75 @@ def update_minmax(
                 weight
             FROM service_profile
         """)
+        service_rows = cur.fetchall()
 
-        results: Dict[str, int] = {}
+        cur.execute("""
+            SELECT
+                sum(cpu_free_m),
+                sum(mem_free_bytes)
+            FROM node_resource_status
+        """)
 
+        free_resources = cur.fetchone()
+        cpu_free = free_resources[0] if free_resources[0] is not None else 0
+        mem_free = free_resources[1] if free_resources[1] is not None else 0
+
+        # results: Dict[str, int] = {}
+        results: Dict[str, dict] = {}
+        min_container = 0
+        max_container = 0
+
+        # min 값 업데이트
         for (
             service,
             request_cnt,
             t_warm,
             t_cold,
             weight,
-        ) in cur.fetchall():
+        ) in service_rows:
 
             # 분자
             numerator = request_cnt 
 
             # 분모
             denominator = (
-                2/ (avg_qos_all * weight)
+                2/ min(1,(avg_qos_all * weight))
                 - 1
             )
 
             if denominator <= 0:
                 print(f"Error: denominator <= 0 for service={service} (den={denominator})")
-                return 0        
+                min_container = numerator   
             else:
-                max_container = math.ceil(numerator / denominator)
+                min_container = math.ceil(numerator / denominator)
 
-            results[service] = max_container
+            results.setdefault(service, {})
+            results[service]["min"] = min_container
+        
+        # max 값 업데이트
+        for service, spec in SERVICE_RESOURCES.items():
+            cpu_limit = cpu_free // spec["cpu_m"]
+            mem_limit = mem_free // spec["mem_bytes"]   # 🔹 bytes 기준
+
+            max_count = min(cpu_limit, mem_limit)
+            max_container = results[service]["min"] + max_count
+
+            results.setdefault(service, {})
+            results[service]["max"] = int(max_container)
         
         # 3) DB 업데이트 (서비스별로 max_container 저장)
+        # for svc, data in results.items():
+        #     print(svc, data)
         cur.executemany(
             """
             UPDATE service_profile
             SET max_container = ?, min_container = ?
             WHERE service = ?
             """,
-            [(mc, mc, svc) for svc, mc in results.items()]
+            [
+                (data["max"], data["min"], svc)
+                for svc, data in results.items()
+            ]
         )
         conn.commit()
 

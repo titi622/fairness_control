@@ -14,11 +14,13 @@ from kubernetes.client import V1Pod
 from kubernetes.client.rest import ApiException
 
 from eviction.eviction_manager import EvictionManager
+import traceback
 
 # ---- Config ----
 SQLITE_PATH = "/home/ubuntu/fairness_control/trace_store.db"
 SERVICE_TABLE = "service_profile"
 MAXCOL = "max_container"
+MINCOL = "min_container"
 SERVICECOL = "service"
 PENDING_MIN_SECONDS = float(1)
 PRINT_REPEAT_SECONDS = float(5)
@@ -77,8 +79,19 @@ def is_pending_unschedulable(pod: V1Pod) -> Tuple[bool, str]:
     return (False, "Pending (no PodScheduled detail)")
 
 
+def sqlite_get_min_container(conn: sqlite3.Connection, service: str) -> Optional[int]:
+    q = f"SELECT {MINCOL} FROM {SERVICE_TABLE} WHERE {SERVICECOL} = ? LIMIT 1"
+    cur = conn.execute(q, (service,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    try:
+        return int(row[0])
+    except Exception:
+        return None
+
 def sqlite_get_max_container(conn: sqlite3.Connection, service: str) -> Optional[int]:
-    q = f"SELECT {MAXCOL} FROM {SERVICE_TABLE} WHERE {SERVICECOL} = ? LIMIT 1"
+    q = f"SELECT {MINCOL} FROM {SERVICE_TABLE} WHERE {SERVICECOL} = ? LIMIT 1"
     cur = conn.execute(q, (service,))
     row = cur.fetchone()
     if not row:
@@ -182,34 +195,39 @@ class EvictionWatcher(threading.Thread):
                     current_rv = pod.metadata.resource_version
 
                     try:
-                        maxc = sqlite_get_max_container(conn, service)
+                        minc = sqlite_get_min_container(conn, service)
                     except sqlite3.OperationalError as e:
                         print(f"[warn] sqlite read failed: {e}")
-                        maxc = None
+                        minc = None
 
                     pod_count = count_running_pods(v1, namespace)
+
+                    if minc is None:
+                        print("[noop] min_container is None")
+                        continue
+                    minc = minc if minc != 0 else 4
 
                     print("\n========== PENDING DETECTED ==========")
                     print(f"pod       : {namespace}/{pod.metadata.name}")
                     # print(f"reason    : {reason}")
-                    print(f"max_cont  : {maxc}")
+                    print(f"min_cont  : {minc}")
                     print(f"pod_count : {pod_count}")
 
-                    # 네 기존 조건 유지 (단 maxc None 방어)
-                    if maxc is None:
-                        print("[noop] max_container is None")
+                    if minc <= pod_count:
+                        print("[noop] pod count > min_container")
                         continue
 
-                    # if maxc ==0 : # or pod_count < maxc:
+                    # if minc ==0 : # or pod_count < minc:
                     print("[action] eviction planning")
                     plan = evict_mgr.find_eviction_plan(service, pod)
 
                     if plan:
                         print(f"=== EVICTION PLAN FOUND ({plan['strategy']}) ===")
-                        print(f"Target Node : {plan['node']}")
+                        # print(f"Target Node : {plan['node']}")
                         for item in plan["evict_list"]:
                             print(f" - Evict {item['count']} pod(s) from {item['service']}")
-                        evict_mgr.execute_eviction(plan["node"], plan["evict_list"])
+                        # evict_mgr.execute_eviction(plan["node"], plan["evict_list"])
+                        evict_mgr.execute_eviction(service, plan["evict_list"])
                     else:
                         # 기존 fallback 로직은 그대로 두되, 여기서는 자리만 남겨둠
                         print("[warn] No feasible eviction plan found. (keep your fallback here)")
@@ -232,6 +250,7 @@ class EvictionWatcher(threading.Thread):
                 if self.stop_event.is_set():
                     break
                 print(f"[warn] eviction watch error: {e} (retry in 2s)", file=sys.stderr)
+                traceback.print_exc()
                 time.sleep(2)
 
         print("[thread] eviction watcher stopped")
@@ -324,6 +343,21 @@ class QuotaReleaserWatcher(threading.Thread):
                         else:
                             continue
                         self._patch_pods_quota(v1, ns, new)
+
+                        ## 쿼터 조정후 파드를 reconcile 하기 위해 강제 삭제 
+                        pods = [
+                            p for p in v1.list_namespaced_pod(
+                                namespace=ns,
+                                field_selector="status.phase=Running"
+                            ).items
+                            if p.metadata.deletion_timestamp is None
+                        ]
+                        pod = pods[0] if pods else None
+                        v1.delete_namespaced_pod(
+                            name=pod.metadata.name,
+                            namespace=ns,
+                            body=client.V1DeleteOptions(grace_period_seconds=0)
+                        )
                         print(f"[quota][patch] ns={ns} {self.quota_name}.hard.pods {cur} -> {new} (obj={src})")
                         print(f"             msg={msg}")
 
