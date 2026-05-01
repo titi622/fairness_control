@@ -141,8 +141,9 @@ def plot_jfi_all(mode, output_path):
         avg_jfi = sum(final_jfi_values) / len(final_jfi_values)
         print(f"\n[{mode}] Average Final JFI: {avg_jfi:.4f}\n")
 
-    plt.xlabel("Time (seconds)", fontsize=20)
-    plt.ylabel("Jain's Fairness Index")
+    plt.xlabel("Time (seconds)", fontsize=30)
+    plt.ylabel("JFI score", fontsize=30)
+    plt.tick_params(axis='both', labelsize=30)
     plt.ylim(0, 1)
     plt.grid(True, linestyle=":", alpha=0.6)
     plt.xlim(left=0)

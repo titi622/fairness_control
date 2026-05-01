@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
+
 SCENARIOS = {
     "scenario1": {
         "services": ["small-fast", "small-fast2"],
@@ -105,11 +106,11 @@ def create_combined_chart(start_time, end_time, services,output_path):
             ax2.plot(q_data['elapsed_sec'], q_data['qos'],
                     label=f'{service} (QoS)', color=current_color, linewidth=2.5)
     # --- 변경 포인트: 시간 정보 제거 ---
-    ax1.set_xlabel('Time (Seconds)', fontsize=20) # 'from start_time' 제거
-    ax1.set_ylabel('Pod Count', color='black', fontsize=20)
-    ax2.set_ylabel('QoS', color='black', fontsize=20)
-    ax1.tick_params(axis='both', labelsize=16)  # 축 숫자 크기
-    ax2.tick_params(axis='both', labelsize=16)  # 축 숫자 크기
+    ax1.set_xlabel('Time (Seconds)', fontsize=30) # 'from start_time' 제거
+    ax1.set_ylabel('Pod Count', color='black', fontsize=30)
+    ax2.set_ylabel('QoS', color='black', fontsize=30)
+    ax1.tick_params(axis='both', labelsize=30)  # 축 숫자 크기
+    ax2.tick_params(axis='both', labelsize=30)  # 축 숫자 크기
 
 
     ax1.set_yticks(np.arange(0, 71, 10))
@@ -128,11 +129,12 @@ def create_combined_chart(start_time, end_time, services,output_path):
         x_max = max(x_max, df_qos['elapsed_sec'].max())
     ax1.set_xlim(0, x_max)
 
-    # 표시 라벨은 그냥 0~700 (100 단위)
-    labels = np.arange(0, 1251, 200)
+    #표시 라벨은 그냥 0~700 (100 단위)
+    labels = np.arange(0, 1001, 500)
 
     # tick 위치는 1200 기준으로 균등하게
-    ticks = np.linspace(0, x_max, len(labels))
+    ticks = np.linspace(0, x_max * (1001/1400), 3)
+    
 
     ax1.set_xticks(ticks)
     ax1.set_xticklabels(labels)
